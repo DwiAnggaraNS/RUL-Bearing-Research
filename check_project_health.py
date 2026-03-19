@@ -72,7 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description="Check project environment and dataset outputs")
     parser.add_argument(
         "--dataset-path",
-        default="/mnt/e/Erge-Bearing_RUL/Datasets/bearing_1/datasets",
+        default="/home/praktikan/projects/github/DwiAnggara/ProyekRisetBearing",
         help="Path to the datasets/output folder used by training and summary notebooks",
     )
     args = parser.parse_args()
