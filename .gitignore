@@ -42,8 +42,7 @@ Thumbs.db
 
 # Data and models
 *.parquet
-*.pth
-*.csv
+*.pt
 *.pkl
 *.pickle
 
