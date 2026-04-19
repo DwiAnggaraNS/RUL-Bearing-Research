@@ -47,9 +47,10 @@ class xLSTMBlock(nn.Module):
         for t in range(seq_len):
             x_t = x[:, t, :]
             
-            # Exponential Gating (Eq. 1 and Eq. 2)
-            i_t = torch.exp(self.W_i(x_t)) 
-            f_t = torch.exp(self.W_f(x_t))
+            # Exponential Gating (Eq. 1 and Eq. 2) with strict upper-bounding to prevent float32 overflow (NaNs)
+            # Max clamped to 0.0 so exp(x) stays within stable range <= 1.0, preserving long sequences.
+            i_t = torch.exp(torch.clamp(self.W_i(x_t), min=-20.0, max=0.0)) 
+            f_t = torch.exp(torch.clamp(self.W_f(x_t), min=-20.0, max=0.0))
             
             # Sigmoid for output gate (Eq. 3)
             o_t = torch.sigmoid(self.W_o(x_t))
@@ -150,11 +151,8 @@ class xLSTM_Transformer_RUL(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
         
         # Output Regression Block (Flatten + Linear)
-        self.flatten = nn.Flatten()
+        self.pool = nn.AdaptiveAvgPool1d(1)
         self.output_linear = nn.Sequential(
-            # Output size depends on Window_Size * embed_dim. 
-            # We will use adaptive pooling to handle any window size dynamically.
-            nn.AdaptiveAvgPool1d(1), 
             nn.Linear(embed_dim, 1),
             nn.ReLU() # RUL is strictly non-negative
         )
@@ -182,8 +180,8 @@ class xLSTM_Transformer_RUL(nn.Module):
         # 4. Regress to RUL Value
         # Permute for AdaptiveAvgPool: (Batch, Seq_Len, Embed_Dim) -> (Batch, Embed_Dim, Seq_Len)
         out = out.permute(0, 2, 1)
-        out = self.output_linear(out).squeeze(-1) # Output shape: (Batch, Embed_Dim)
-        rul_pred = self.output_linear[1:](out)       # Output shape: (Batch, 1)
+        out = self.pool(out).squeeze(-1) # Output shape: (Batch, Embed_Dim)
+        rul_pred = self.output_linear(out)       # Output shape: (Batch, 1)
         
         return rul_pred
 
