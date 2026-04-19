@@ -26,6 +26,9 @@ class xLSTMBlock(nn.Module):
         self.W_o = nn.Linear(input_dim, hidden_dim)
         self.W_z = nn.Linear(input_dim, hidden_dim)
         
+        # Stability Additions
+        self.group_norm = nn.GroupNorm(1, hidden_dim)
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for the xLSTM block over a sequence.
@@ -48,9 +51,8 @@ class xLSTMBlock(nn.Module):
             x_t = x[:, t, :]
             
             # Exponential Gating (Eq. 1 and Eq. 2) with strict upper-bounding to prevent float32 overflow (NaNs)
-            # Max clamped to 0.0 so exp(x) stays within stable range <= 1.0, preserving long sequences.
-            i_t = torch.exp(torch.clamp(self.W_i(x_t), min=-20.0, max=0.0)) 
-            f_t = torch.exp(torch.clamp(self.W_f(x_t), min=-20.0, max=0.0))
+            i_t = torch.exp(torch.clamp(self.W_i(x_t), min=-10.0, max=5.0)) 
+            f_t = torch.exp(torch.clamp(self.W_f(x_t), min=-10.0, max=5.0))
             
             # Sigmoid for output gate (Eq. 3)
             o_t = torch.sigmoid(self.W_o(x_t))
@@ -64,9 +66,20 @@ class xLSTMBlock(nn.Module):
             
             # Output computation with normalizer (Eq. 6)
             h_t = o_t * (c_t / (n_t + 1e-6))
+            
+            # Stability Clamp
+            h_t = torch.clamp(h_t, min=-1e4, max=1e4)
             outputs.append(h_t.unsqueeze(1))
             
-        return torch.cat(outputs, dim=1)
+        out_tensor = torch.cat(outputs, dim=1)
+        
+        # Apply GroupNorm to ensure bounded activation variances entering the next layer
+        # Shape manipulation for GroupNorm: (B, C, L)
+        out_tensor = out_tensor.permute(0, 2, 1)
+        out_tensor = self.group_norm(out_tensor)
+        out_tensor = out_tensor.permute(0, 2, 1)
+        
+        return out_tensor
 
 # ==============================================================================
 # 2. HYBRID ENCODER: TRANSFORMER + xLSTM 
