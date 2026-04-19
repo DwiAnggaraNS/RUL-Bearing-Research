@@ -50,9 +50,10 @@ class xLSTMBlock(nn.Module):
         for t in range(seq_len):
             x_t = x[:, t, :]
             
-            # Exponential Gating (Eq. 1 and Eq. 2) with strict upper-bounding to prevent float32 overflow (NaNs)
-            i_t = torch.exp(torch.clamp(self.W_i(x_t), min=-10.0, max=5.0)) 
-            f_t = torch.exp(torch.clamp(self.W_f(x_t), min=-10.0, max=5.0))
+            # Exponential Gating (Eq. 1 and Eq. 2)
+            # Clamping specifically to max 2.0 to allow moderate exponential variance but avoid immediate blowups
+            i_t = torch.exp(torch.clamp(self.W_i(x_t), min=-15.0, max=2.0)) 
+            f_t = torch.exp(torch.clamp(self.W_f(x_t), min=-15.0, max=2.0))
             
             # Sigmoid for output gate (Eq. 3)
             o_t = torch.sigmoid(self.W_o(x_t))
@@ -64,17 +65,33 @@ class xLSTMBlock(nn.Module):
             c_t = f_t * c_t + i_t * z_t
             n_t = f_t * n_t + i_t
             
+            # --- CRITICAL FIX: DYNAMIC STATE RESCALING ---
+            # Multiplicative accumulation of f_t (which can be > 1.0) over large sequences (30-70 steps)
+            # will rapidly exceed the max float32 value (~3.4e38), resulting in Inf and then NaN in c_t / n_t.
+            # To fix this, we normalize c_t and n_t dynamically while preserving their exact ratio.
+            safe_limit = 1e4
+            scale_factor = torch.clamp(n_t, min=1.0)
+            should_scale = scale_factor > safe_limit
+            if should_scale.any():
+                scale_div = torch.where(should_scale, scale_factor / safe_limit, torch.ones_like(scale_factor))
+                c_t = c_t / scale_div
+                n_t = n_t / scale_div
+
             # Output computation with normalizer (Eq. 6)
             h_t = o_t * (c_t / (n_t + 1e-6))
             
-            # Stability Clamp
-            h_t = torch.clamp(h_t, min=-1e4, max=1e4)
+            # Final fallback safeguard for internal states
+            if torch.isnan(h_t).any():
+                print(f"[xLSTMBlock DEBUG] Detected NaN at timestep {t}. Applying zero-fill recovery.")
+                h_t = torch.nan_to_num(h_t, nan=0.0)
+                c_t = torch.nan_to_num(c_t, nan=0.0)
+                n_t = torch.nan_to_num(n_t, nan=1.0)
+                
             outputs.append(h_t.unsqueeze(1))
             
         out_tensor = torch.cat(outputs, dim=1)
         
         # Apply GroupNorm to ensure bounded activation variances entering the next layer
-        # Shape manipulation for GroupNorm: (B, C, L)
         out_tensor = out_tensor.permute(0, 2, 1)
         out_tensor = self.group_norm(out_tensor)
         out_tensor = out_tensor.permute(0, 2, 1)
