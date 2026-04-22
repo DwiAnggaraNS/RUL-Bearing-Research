@@ -23,6 +23,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+/LSTM_Results
+
 # Virtual environments
 venv/
 ENV/
