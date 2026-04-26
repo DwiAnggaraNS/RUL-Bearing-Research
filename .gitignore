@@ -31,6 +31,8 @@ ENV/
 env/
 .venv
 
+/docs_for_improvement
+
 # IDE
 .vscode/
 .idea/
