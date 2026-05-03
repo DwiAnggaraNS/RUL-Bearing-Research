@@ -22,6 +22,7 @@ Emojis: none
 
 import numpy as np
 import scipy.stats as stats
+from scipy.signal import hilbert
 from typing import Dict
 
 
@@ -39,14 +40,27 @@ class CrossDomainFeatureExtractor:
     No artificial frequency cap is applied.
     """
 
-    def __init__(self, sampling_rate: float):
+    def __init__(self, sampling_rate: float, f_r: float = 35.0):
         """
         Initialise the extractor.
 
         Args:
             sampling_rate: ADC sampling rate in Hz (e.g. 25600.0 for XJTU-SY).
+            f_r: Rotating frequency in Hz (default 35.0 Hz for Condition 1).
         """
         self.sampling_rate = sampling_rate
+        self.f_r = f_r
+        
+        # XJTU-SY Bearing Parameters
+        D = 34.55  # Pitch diameter
+        d = 7.92   # Ball diameter
+        Z = 8      # Number of balls
+        alpha = 0  # Contact angle
+
+        # Defect frequencies
+        self.bpfo = (Z / 2) * f_r * (1 - (d / D) * np.cos(alpha))
+        self.bpfi = (Z / 2) * f_r * (1 + (d / D) * np.cos(alpha))
+        self.bsf  = (D / (2 * d)) * f_r * (1 - ((d / D) * np.cos(alpha))**2)
 
     def extract_time_domain(self, signal: np.ndarray) -> Dict[str, float]:
         """
@@ -128,19 +142,63 @@ class CrossDomainFeatureExtractor:
             "fd_fft_p2p":       fft_p2p,
         }
 
+    def extract_envelope_domain(self, signal: np.ndarray) -> Dict[str, float]:
+        """
+        Compute envelope spectrum amplitudes at specific physical defect frequencies
+        (BPFO, BPFI, BSF). Uses Hilbert Transform -> Envelope -> FFT.
+        
+        Args:
+            signal: 1-D array of raw vibration samples.
+            
+        Returns:
+            Dictionary with keys: fd_bpfo_amp, fd_bpfi_amp, fd_bsf_amp.
+        """
+        n = len(signal)
+        if n == 0:
+            return {"fd_bpfo_amp": 0.0, "fd_bpfi_amp": 0.0, "fd_bsf_amp": 0.0}
+            
+        # 1. Analytic signal via Hilbert Transform
+        analytic_signal = hilbert(signal)
+        
+        # 2. Envelope extraction
+        envelope = np.abs(analytic_signal)
+        
+        # Remove DC component (mean)
+        envelope -= np.mean(envelope)
+        
+        # 3. FFT of envelope
+        fft_values = np.fft.rfft(envelope)
+        fft_magnitudes = np.abs(fft_values) / n
+        frequencies = np.fft.rfftfreq(n, d=1.0 / self.sampling_rate)
+        
+        # 4. Find amplitude near target frequencies
+        def get_amp(target_hz, tolerance=2.0):
+            # Find frequencies within tolerance
+            idx = np.where(np.abs(frequencies - target_hz) <= tolerance)[0]
+            if len(idx) > 0:
+                return float(np.max(fft_magnitudes[idx]))
+            return 0.0
+            
+        return {
+            "fd_bpfo_amp": get_amp(self.bpfo),
+            "fd_bpfi_amp": get_amp(self.bpfi),
+            "fd_bsf_amp":  get_amp(self.bsf),
+        }
+
     def extract_all_features(self, signal: np.ndarray) -> Dict[str, float]:
         """
-        Extract all 14 features and sanitise against NaN / Inf values.
+        Extract all 17 features and sanitise against NaN / Inf values.
 
         Args:
             signal: 1-D array of raw vibration samples.
 
         Returns:
-            Dictionary of 14 finite float feature values.
+            Dictionary of 17 finite float feature values.
         """
         features: Dict[str, float] = {}
         features.update(self.extract_time_domain(signal))
         features.update(self.extract_freq_domain(signal))
+        features.update(self.extract_envelope_domain(signal))
         features = {
             k: float(np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0))
             for k, v in features.items()
