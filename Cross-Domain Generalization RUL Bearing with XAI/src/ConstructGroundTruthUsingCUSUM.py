@@ -164,6 +164,57 @@ class UnivariateCUSUMDetector:
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.tight_layout()
         plt.show()
+    
+    def detect_change_point_sigma(self, signal, window_size=10, threshold=3.0):
+        """
+        Deteksi Change Point menggunakan Sliding Window 3-Sigma.
+        Metode ini lebih stabil terhadap noise sesaat (spike) dibandingkan CUSUM murni.
+        
+        Args:
+            signal (np.ndarray): Array 1D data fitur (RMS/Composite).
+            window_size (int): Jumlah sampel sebelumnya untuk menghitung statistik lokal.
+            threshold (float): Perkalian sigma (default 3.0).
+            
+        Returns:
+            int: Index di mana degradasi dimulai.
+        """
+        signal = np.asarray(signal)
+        n = len(signal)
+        self.change_point = n - 1
+
+        # Guard: Jika data terlalu pendek, kembalikan indeks terakhir
+        if n < window_size:
+            return n - 1
+            
+        # Mulai scanning setelah window_size terlewati
+        for i in range(window_size, n):
+            # 1. Ambil data historis (window) untuk baseline lokal
+            history = signal[i - window_size : i]
+            
+            mu = np.mean(history)
+            sigma = np.std(history)
+            
+            # Guard: Hindari pembagian nol jika data flat sempurna
+            if sigma < 1e-9:
+                sigma = 1e-9
+                
+            # 2. Hitung batas atas (Upper Control Limit)
+            limit = mu + (threshold * sigma)
+            
+            # 3. Cek apakah titik saat ini melampaui batas
+            if signal[i] > limit:
+                # 4. Validasi Tambahan: Pastikan ini bukan noise sesaat (spike)
+                # Cek apakah rata-rata 3 poin ke depan juga tetap tinggi
+                if i + 3 < n:
+                    if np.mean(signal[i : i+3]) > mu:
+                        self.change_point = i
+                        print(f"  Change point detected at index: {self.change_point}")    
+                        return i
+                else:
+                    # Jika mendekati akhir data, anggap valid jika tembus batas
+                    return i
+        # Jika tidak terdeteksi sama sekali, kembalikan indeks terakhir
+        return n - 1
 
 
 # ==========================================
