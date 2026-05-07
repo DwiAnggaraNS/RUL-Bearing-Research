@@ -37,11 +37,12 @@ class FeatureExtractionAndSelection:
             3: 40.0
         }
 
-    def _extract_time_features(self, signal: np.ndarray, is_horizontal: bool = True) -> np.ndarray:
+    def _extract_time_features(self, signal: np.ndarray) -> np.ndarray:
         """
-        Extracts 9 time-domain features from a given 1D vibration signal.
+        Extracts 7 time-domain features from a given 1D vibration signal.
+        The features are: Max Amplitude, RMS, Kurtosis, Shape Factor, Skewness, Impulse Factor, Crest Factor.
         """
-        features = np.zeros(9)
+        features = np.zeros(7)
         abs_sig = np.abs(signal)
         
         features[0] = np.max(abs_sig)
@@ -54,25 +55,11 @@ class FeatureExtractionAndSelection:
         features[5] = features[0] / mean_abs if mean_abs != 0 else 0  # Impulse factor
         features[6] = features[0] / features[1] if features[1] != 0 else 0  # Crest factor
         
-        # Histogram-based features
-        counts, edges = np.histogram(abs_sig, density=True)
-        edges = edges[:-1]
-        
-        if is_horizontal:
-            mask1 = edges > 1
-            mask2 = edges > 5
-        else:
-            mask1 = edges > 1
-            mask2 = edges > 2
-            
-        features[7] = np.sum(counts[mask1] * edges[mask1])
-        features[8] = np.sum(counts[mask2] * edges[mask2])
-        
         return features
 
     def _extract_frequency_features(self, signal: np.ndarray, shaft_freq: float) -> np.ndarray:
         """
-        Extracts 16 frequency-domain features and 8 wavelet energy features.
+        Extracts 24 frequency-domain features (16 fault/overall energy + 8 evenly divided one-sided spectrum bands).
         """
         m = len(signal)
         df = self.sampling_frequency_hz / m
@@ -89,7 +76,7 @@ class FeatureExtractionAndSelection:
         P1 = P2[:m//2 + 1]
         P1[1:-1] = 2 * P1[1:-1]
         
-        features = np.zeros(24) # 16 frequency + 8 wavelet
+        features = np.zeros(24)
         
         def calculate_band_energy(center_freq: float, margin: float = 0.05) -> float:
             si = int((1 - margin) * center_freq / df)
@@ -130,14 +117,16 @@ class FeatureExtractionAndSelection:
         si_low_bearing = int(shaft_freq * 2.1 / df)
         features[15] = np.sqrt(np.sum(P1[si_low_bearing:ei_low]**2) / 2)
         
-        # Wavelet energies (8 bands)
+        # 8 evenly divided portions of the one-sided FFT spectrum (not wavelets)
         P1[0] = 0 # Remove DC
-        for nwave in range(1, 9):
-            si_w = int((nwave - 1) * self.sampling_frequency_hz / 8 / df / 2)
-            ei_w = int(nwave * self.sampling_frequency_hz / 8 / df / 2)
-            si_w = max(0, min(si_w, len(P1)-1))
-            ei_w = max(0, min(ei_w, len(P1)-1))
-            features[16 + (nwave - 1)] = np.sqrt(np.sum(P1[si_w:ei_w]**2) / 2)
+        band_size = (self.sampling_frequency_hz / 2) / 8
+        for n_band in range(1, 9):
+            si_b = int((n_band - 1) * band_size / df)
+            if si_b == 0: si_b = 1  # Avoid DC again
+            ei_b = int(n_band * band_size / df)
+            si_b = max(0, min(si_b, len(P1)-1))
+            ei_b = max(0, min(ei_b, len(P1)-1))
+            features[16 + (n_band - 1)] = np.sqrt(np.sum(P1[si_b:ei_b]**2) / 2)
             
         return features
 
@@ -148,9 +137,11 @@ class FeatureExtractionAndSelection:
         
         Returns:
             Dict[str, np.ndarray]: A dictionary mapping a string identifier (e.g., 'Condition_1_Bearing_1')
-                                   to a 2D numpy array of shape (num_files, 66).
+                                   to a 2D numpy array of shape (num_files, 124).
                                    Each row represents features extracted from one CSV file.
         """
+        import scipy.signal
+        from scipy.integrate import cumulative_trapezoid
         extracted_data = {}
         
         # Traverse conditions
@@ -183,21 +174,35 @@ class FeatureExtractionAndSelection:
                     try:
                         df_data = pd.read_csv(csv_file, header=None)
                         if df_data.shape[1] >= 2:
-                            # Assuming horizontal axis at col 0, vertical at col 1
-                            ha_signal = df_data.iloc[:, 0].values
-                            va_signal = df_data.iloc[:, 1].values
+                            # Assuming horizontal acceleration at col 0, vertical acceleration at col 1
+                            ha_acc_signal = df_data.iloc[:, 0].values
+                            va_acc_signal = df_data.iloc[:, 1].values
                             
-                            # Extract horizontal
-                            ha_time = self._extract_time_features(ha_signal, is_horizontal=True)
-                            ha_freq = self._extract_frequency_features(ha_signal, shaft_freq)
+                            # Derive velocity from acceleration numerically (prevent drift by detrending)
+                            ha_vel_signal = scipy.signal.detrend(
+                                cumulative_trapezoid(scipy.signal.detrend(ha_acc_signal), dx=1/self.sampling_frequency_hz, initial=0)
+                            )
+                            va_vel_signal = scipy.signal.detrend(
+                                cumulative_trapezoid(scipy.signal.detrend(va_acc_signal), dx=1/self.sampling_frequency_hz, initial=0)
+                            )
                             
-                            # Extract vertical
-                            va_time = self._extract_time_features(va_signal, is_horizontal=False)
-                            va_freq = self._extract_frequency_features(va_signal, shaft_freq)
+                            # Extract horizontal direction features (Acc & Vel) = 31 + 31 = 62 features
+                            ha_acc_time = self._extract_time_features(ha_acc_signal)
+                            ha_acc_freq = self._extract_frequency_features(ha_acc_signal, shaft_freq)
+                            ha_vel_time = self._extract_time_features(ha_vel_signal)
+                            ha_vel_freq = self._extract_frequency_features(ha_vel_signal, shaft_freq)
                             
-                            # Combine all 66 features per CSV structure 
-                            # (9 + 24) * 2 = 66 features
-                            file_features = np.concatenate([ha_time, ha_freq, va_time, va_freq])
+                            # Extract vertical direction features (Acc & Vel) = 31 + 31 = 62 features
+                            va_acc_time = self._extract_time_features(va_acc_signal)
+                            va_acc_freq = self._extract_frequency_features(va_acc_signal, shaft_freq)
+                            va_vel_time = self._extract_time_features(va_vel_signal)
+                            va_vel_freq = self._extract_frequency_features(va_vel_signal, shaft_freq)
+                            
+                            # Combine all 124 features per CSV structure 
+                            file_features = np.concatenate([
+                                ha_acc_time, ha_acc_freq, ha_vel_time, ha_vel_freq,
+                                va_acc_time, va_acc_freq, va_vel_time, va_vel_freq
+                            ])
                             bearing_features.append(file_features)
                             
                     except Exception as e:
