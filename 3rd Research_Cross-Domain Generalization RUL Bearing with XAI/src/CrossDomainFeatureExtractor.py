@@ -172,8 +172,11 @@ class CrossDomainFeatureExtractor:
         frequencies = np.fft.rfftfreq(n, d=1.0 / self.sampling_rate)
         
         # 4. Find amplitude near target frequencies
-        def get_amp(target_hz, tolerance=2.0):
-            # Find frequencies within tolerance
+        def get_amp(target_hz, tolerance=None):
+            # Hitung resolusi frekuensi secara dinamis
+            freq_resolution = self.sampling_rate / n  # = 25 Hz untuk 1024 samples
+            if tolerance is None:
+                tolerance = 2 * freq_resolution  # ±2 bin = ±50 Hz
             idx = np.where(np.abs(frequencies - target_hz) <= tolerance)[0]
             if len(idx) > 0:
                 return float(np.max(fft_magnitudes[idx]))
