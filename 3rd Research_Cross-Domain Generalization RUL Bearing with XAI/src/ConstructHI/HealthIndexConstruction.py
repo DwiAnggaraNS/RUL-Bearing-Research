@@ -85,19 +85,30 @@ class HealthIndexConstruction:
         old_mon = np.abs(pos_steps - neg_steps) / (m - 1)
         
         # 3. Modified Monotonicity (Invoked via external/provided function)
-        # Using 10 measurements prior to FPT to estimate noise sigma
-        pre_fpt_data = hi_signal[max(0, fpt_index - 10):fpt_index]
+        # Using exactly 7 measurements prior to FPT to estimate noise sigma
+        # MATLAB: f_before_fpt = myf_org(FPT-7:FPT-1, i)  → 7 points
+        pre_fpt_data = hi_signal[max(0, fpt_index - 7):fpt_index]
         sigma_noise = np.std(pre_fpt_data) if len(pre_fpt_data) > 1 else 1e-3
-        mod_mon = mod_monotonicity_func(degradation_phase, sigma=sigma_noise)
+        mod_mon = mod_monotonicity_func(degradation_phase, sigma_noise)
         
         # 4. Robustness
-        kernel_size = min(4, m)
-        kernel = np.ones(kernel_size) / kernel_size
-        smoothed_hi = np.convolve(degradation_phase, kernel, mode='same')
+        # MATLAB: fsmooth = movmean(myf(:,i), [4,0])  → causal trailing window of 4 past points
+        # np.convolve 'same' is symmetric (acausal) — must use pandas/manual causal window instead
+        kernel_size = 5  # [4,0] in MATLAB means 4 past + current = 5 total points
+        smoothed_hi = np.array([
+            np.mean(degradation_phase[max(0, k - 4): k + 1])
+            for k in range(m)
+        ])
         
-        # Avoid division by zero by adding small epsilon
-        epsilon = 1e-8
-        robustness_arr = np.exp(-np.abs(degradation_phase - smoothed_hi) / (degradation_phase + epsilon))
+        # MATLAB: exp(-abs((myf - fsmooth) ./ myf))  — divides by the original signal, not (signal+eps)
+        # Guard against exact zero values in the signal
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(
+                degradation_phase != 0,
+                np.abs((degradation_phase - smoothed_hi) / degradation_phase),
+                0.0
+            )
+        robustness_arr = np.exp(-ratio)
         robustness = np.mean(robustness_arr)
         
         return {
@@ -113,45 +124,54 @@ class HealthIndexConstruction:
         """
         Calculates the Modified Signal-to-Noise Ratio (SNR) across a population of units.
         
-        Args:
-            hi_population (List[np.ndarray]): List of HI arrays for all units in the training set.
-            fpt_indices (List[int]): First Prediction Time indices corresponding to each unit.
-            
-        Returns:
-            float: The computed Modified SNR value.
+        MATLAB reference (get_snr):
+            R   = sum over i of (myHI(end) - myHI(1)) / Nbearing
+            v   = sum over i of (myHI(end) - endHI_avg)^2 / (Nbearing-1)
+            sigma_sq = sum over i of sum(er.^2) / Nbearing
+            mysnr = R^2 / (sigma_sq + v)
+        where HI_smooth = movmean(myHI, [3,0])  → causal 4-point window (3 past + current)
         """
         n_units = len(hi_population)
         if n_units == 0:
             return 0.0
-            
-        # Extract EOL values and ranges
+
+        # Compute EOL values for variance term (v)
         eol_values = np.array([hi[-1] for hi in hi_population])
-        ranges = np.array([hi[-1] - hi[fpt] for hi, fpt in zip(hi_population, fpt_indices)])
-        
-        mean_range = np.mean(ranges)
-        
-        # Compute EOL Variance (theta)
-        mean_eol = np.mean(eol_values)
-        theta = np.sum((eol_values - mean_eol)**2) / (n_units - 1) if n_units > 1 else 0.0
-        
-        # Compute residual noise variance (sigma_noise^2)
-        total_residual_variance = 0.0
+        endHI_avg = np.mean(eol_values)
+
+        R = 0.0
+        v = 0.0
+        sigma_sq = 0.0
+
         for hi, fpt in zip(hi_population, fpt_indices):
-            deg_phase = hi[fpt:]
-            m = len(deg_phase)
-            kernel_size = min(4, m)
-            if kernel_size > 0:
-                smoothed_hi = np.convolve(deg_phase, np.ones(kernel_size)/kernel_size, mode='same')
-                total_residual_variance += np.mean((deg_phase - smoothed_hi)**2)
-                
-        sigma_noise_sq = total_residual_variance / n_units
-        
-        # Final Modified SNR calculation
-        denominator = sigma_noise_sq + theta
+            # MATLAB: myHI = HI{i}(FPT(i):end)
+            myHI = hi[fpt:]
+            m = len(myHI)
+
+            # R accumulation: (end - start) / Nbearing
+            # MATLAB: R = R + (myHI(end) - myHI(1)) / Nbearing
+            R += (myHI[-1] - myHI[0]) / n_units
+
+            # v accumulation: (end - mean_end)^2 / (Nbearing-1)
+            # MATLAB: v = v + (myHI(end) - endHI_avg)^2 / (Nbearing-1)
+            if n_units > 1:
+                v += (myHI[-1] - endHI_avg) ** 2 / (n_units - 1)
+
+            # sigma_sq: MATLAB uses movmean([3,0]) = causal window of 3 past + current = 4 points
+            # MATLAB: sigma_sq = sigma_sq + sum(er.^2) / Nbearing
+            smoothed = np.array([
+                np.mean(myHI[max(0, k - 3): k + 1])
+                for k in range(m)
+            ])
+            er = myHI - smoothed
+            sigma_sq += np.sum(er ** 2) / n_units
+
+        denominator = sigma_sq + v
         if denominator == 0:
             return 0.0
-            
-        modified_snr = (mean_range**2) / denominator
+
+        # MATLAB: mysnr = R*R / (sigma_sq + v)
+        modified_snr = (R ** 2) / denominator
         return float(modified_snr)
 
     def generate_optimal_hi(self, population_features: List[np.ndarray], 
@@ -171,7 +191,7 @@ class HealthIndexConstruction:
         Returns:
             Tuple[np.ndarray, Dict[str, float]]: The optimal weight array and its corresponding metrics.
         """
-        num_features = population_features.shape[7]
+        num_features = population_features[0].shape[1]
         n_units = len(population_features)
         
         # 1. Weight Generation
@@ -199,8 +219,8 @@ class HealthIndexConstruction:
             
             # Calculate Meta-Probabilities
             # Assume get_meta_prob_func returns (meta_prob_value, cutoffs, metric_curve)
-            meta_prob_spearman, _, _ = get_meta_prob_func(spearman_scores, cutoff_range=(0.8, 1.0))
-            meta_prob_mod_mon, _, _ = get_meta_prob_func(mod_mon_scores, cutoff_range=(0.5, 1.0))
+            meta_prob_spearman, _, _ = get_meta_prob_func(spearman_scores, (0.8, 1.0))
+            meta_prob_mod_mon, _, _ = get_meta_prob_func(mod_mon_scores, (0.5, 1.0))
             
             # For SNR, typical normalization is applied, simplified here to aggregate performance
             # In a strict setting, SNR can be treated as a single optimization target alongside meta-probs

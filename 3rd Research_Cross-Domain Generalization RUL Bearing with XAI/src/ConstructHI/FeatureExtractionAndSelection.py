@@ -230,7 +230,7 @@ class FeatureExtractionAndSelection:
         # Determine if the feature is generally increasing or decreasing
         # Evaluates the averages of the first two and last two points
         end_avg = (feature_series[-1] + feature_series[-2]) / 2.0
-        start_avg = (feature_series + feature_series[9]) / 2.0
+        start_avg = (feature_series[0] + feature_series[1]) / 2.0
         
         if end_avg >= start_avg:
             myf = feature_series
@@ -275,7 +275,7 @@ class FeatureExtractionAndSelection:
         n_bearings = len(metric_values)
         
         # Define 100 evaluation points between lower and upper cutoffs
-        cutoff_vec = np.linspace(cutoff_range, cutoff_range[9], 100)
+        cutoff_vec = np.linspace(cutoff_range[0], cutoff_range[1], 100)
         metric_vec = np.zeros(len(cutoff_vec))
         
         # Evaluate how many units exceed each cutoff
@@ -283,8 +283,8 @@ class FeatureExtractionAndSelection:
             metric_vec[j] = np.sum(metric_values > cutoff_vec[j])
             
         # Calculate survival probability integral using trapezoidal rule
-        integral_val = np.trapz(metric_vec, x=cutoff_vec)
-        meta_probability = integral_val / (cutoff_range[9] - cutoff_range) / n_bearings
+        integral_val = np.trapezoid(metric_vec, x=cutoff_vec)
+        meta_probability = integral_val / (cutoff_range[1] - cutoff_range[0]) / n_bearings
         
         return float(meta_probability), cutoff_vec, metric_vec
 
