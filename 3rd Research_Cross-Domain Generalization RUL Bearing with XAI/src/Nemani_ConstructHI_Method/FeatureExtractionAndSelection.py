@@ -13,7 +13,7 @@ class FeatureExtractionAndSelection:
     meta-probability of Spearman correlation and Modified Monotonicity.
     """
 
-    def __init__(self, data_directory: str):
+    def __init__(self, data_directory: str, dataset_name: str):
         """
         Initializes the feature extraction parameters based on bearing specifications.
         
@@ -22,20 +22,39 @@ class FeatureExtractionAndSelection:
                                   Directory structure: data_directory / condition / bearing / *.csv
         """
         self.data_dir = data_directory
+        self.dataset_name = dataset_name
+
+        if self.dataset_name == "XJTU":
         
-        # Bearing Dimensions for XJTU bearing dataset
-        self.ball_diameter_mm = 7.92
-        self.mean_bearing_diameter_mm = 34.55
-        self.num_balls = 8
-        self.sampling_frequency_hz = 25.6e3
-        
-        # Shaft frequencies in Hz for the 15 bearings (5 bearings per condition)
-        # Condition 1: 35.0 Hz, Condition 2: 37.5 Hz, Condition 3: 40.0 Hz
-        self.shaft_frequencies = {
-            1: 35.0,
-            2: 37.5,
-            3: 40.0
-        }
+            # Bearing Dimensions for XJTU bearing dataset
+            self.ball_diameter_mm = 7.92
+            self.mean_bearing_diameter_mm = 34.55
+            self.num_balls = 8
+            self.sampling_frequency_hz = 25.6e3
+            
+            # Shaft frequencies in Hz for the 15 bearings (5 bearings per condition)
+            # Condition 1: 35.0 Hz, Condition 2: 37.5 Hz, Condition 3: 40.0 Hz
+            self.shaft_frequencies = {
+                1: 35.0,
+                2: 37.5,
+                3: 40.0
+            }
+        elif self.dataset_name == "PRONOSTIA":
+            # Bearing Dimensions for PRONOSTIA (IEEE PHM 2012) dataset
+            self.ball_diameter_mm = 3.5          # Diameter of rolling elements (d)
+            self.mean_bearing_diameter_mm = 25.6 # Bearing mean diameter (Dm)
+            self.num_balls = 13                  # Number of rolling elements (Z)
+            self.sampling_frequency_hz = 25.6e3  # Sampling frequency: 25.6 kHz
+            
+            # Shaft frequencies in Hz for the 3 operating conditions
+            # Condition 1: 1800 rpm -> 30.0 Hz (Load: 4000 N)
+            # Condition 2: 1650 rpm -> 27.5 Hz (Load: 4200 N)
+            # Condition 3: 1500 rpm -> 25.0 Hz (Load: 5000 N)
+            self.shaft_frequencies = {
+                1: 30.0,
+                2: 27.5,
+                3: 25.0
+            }
 
     def _extract_time_features(self, signal: np.ndarray) -> np.ndarray:
         """
@@ -71,7 +90,7 @@ class FeatureExtractionAndSelection:
               (1 - (self.ball_diameter_mm / self.mean_bearing_diameter_mm)**2) * shaft_freq
               
         # Perform FFT
-        Y = fft(np.abs(signal))
+        Y = fft(signal)
         P2 = np.abs(Y / m)
         P1 = P2[:m//2 + 1]
         P1[1:-1] = 2 * P1[1:-1]
@@ -256,6 +275,101 @@ class FeatureExtractionAndSelection:
         modified_monotonicity = np.sum(allc) / sum_abs_allc
         return float(modified_monotonicity)
 
+    def extract_features_from_array(self, window_array: np.ndarray, shaft_freq: float) -> np.ndarray:
+        """
+        Iterates over a numpy array of shape (n_samples, 2) and extracts features.
+        
+        Args:
+            window_array (np.ndarray): 2D array representing (timesteps, channels). Channel 0 is horizontal, 1 is vertical.
+            shaft_freq (float): Shaft frequency for feature calculations.
+            
+        Returns:
+            np.ndarray: Matrix of shape (n_samples, 124) with extracted features.
+        """
+        import scipy.signal
+        from scipy.integrate import cumulative_trapezoid
+        
+        fs = self.sampling_frequency_hz
+        n_samples = window_array.shape[0]
+        extracted_features = np.zeros((n_samples, 124))
+        
+        for i in range(n_samples):
+            window = window_array[i]
+            ha_acc_signal = window[:, 0]
+            va_acc_signal = window[:, 1]
+            
+            # Derive velocity from acceleration numerically (prevent drift by detrending)
+            ha_vel_signal = scipy.signal.detrend(
+                cumulative_trapezoid(scipy.signal.detrend(ha_acc_signal), dx=1/fs, initial=0)
+            )
+            va_vel_signal = scipy.signal.detrend(
+                cumulative_trapezoid(scipy.signal.detrend(va_acc_signal), dx=1/fs, initial=0)
+            )
+            
+            # Extract horizontal direction features (Acc & Vel) = 31 + 31 = 62 features
+            ha_acc_time = self._extract_time_features(ha_acc_signal)
+            ha_acc_freq = self._extract_frequency_features(ha_acc_signal, shaft_freq)
+            ha_vel_time = self._extract_time_features(ha_vel_signal)
+            ha_vel_freq = self._extract_frequency_features(ha_vel_signal, shaft_freq)
+            
+            # Extract vertical direction features (Acc & Vel) = 31 + 31 = 62 features
+            va_acc_time = self._extract_time_features(va_acc_signal)
+            va_acc_freq = self._extract_frequency_features(va_acc_signal, shaft_freq)
+            va_vel_time = self._extract_time_features(va_vel_signal)
+            va_vel_freq = self._extract_frequency_features(va_vel_signal, shaft_freq)
+            
+            extracted_features[i, :] = np.concatenate([
+                ha_acc_time, ha_acc_freq, ha_vel_time, ha_vel_freq,
+                va_acc_time, va_acc_freq, va_vel_time, va_vel_freq
+            ])
+            
+        return extracted_features
+
+    def calculate_criteria(self, features_list: List[np.ndarray], target_list: List[np.ndarray]) -> pd.DataFrame:
+        """
+        Calculates Spearman Correlation & Modified Monotonicity for each feature, averaged per bearing.
+        
+        Args:
+            features_list (List[np.ndarray]): List of 2D extracted feature matrices for each bearing.
+            target_list (List[np.ndarray]): List of 1D target RUL arrays for each bearing.
+            
+        Returns:
+            pd.DataFrame: Contains columns Feature_Idx, Spearman, Monotonicity, and Criteria (which is their average).
+        """
+        num_features = features_list[0].shape[1]
+        feature_metrics = []
+        
+        for i in range(num_features):
+            spearmans = []
+            mons = []
+            
+            for feats, target in zip(features_list, target_list):
+                feat_series = feats[:, i]
+                
+                # Pearson/Spearman 
+                spearman_c, _ = scipy.stats.spearmanr(feat_series, target)
+                sp = abs(spearman_c) if not np.isnan(spearman_c) else 0.0
+                spearmans.append(sp)
+                
+                # Modified Monotonicity
+                mon = self.calculate_modified_monotonicity(feat_series, sigma=0.01)
+                mon = abs(mon) if not np.isnan(mon) else 0.0
+                mons.append(mon)
+                
+            mean_spearman = np.mean(spearmans)
+            mean_mon = np.mean(mons)
+            
+            cri = (mean_spearman + mean_mon) / 2.0
+            
+            feature_metrics.append({
+                'Feature_Idx': i,
+                'Spearman': mean_spearman,
+                'Monotonicity': mean_mon,
+                'Criteria': cri
+            })
+            
+        return pd.DataFrame(feature_metrics)
+
     @staticmethod
     def calculate_meta_probability(metric_values: np.ndarray, cutoff_range: Tuple[float, float]) -> Tuple[float, np.ndarray, np.ndarray]:
         """
@@ -314,4 +428,4 @@ class FeatureExtractionAndSelection:
             (monotonicity_meta_probs > monotonicity_threshold)
         )
         
-        return selected_feature_indices
+        return selected_feature_indices[0]
