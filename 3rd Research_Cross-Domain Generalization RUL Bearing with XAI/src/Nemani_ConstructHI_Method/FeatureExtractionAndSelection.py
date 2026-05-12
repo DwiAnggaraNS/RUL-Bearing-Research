@@ -96,57 +96,57 @@ class FeatureExtractionAndSelection:
         P1[1:-1] = 2 * P1[1:-1]
         
         features = np.zeros(24)
-        
+                
         def calculate_band_energy(center_freq: float, margin: float = 0.05) -> float:
-            si = int((1 - margin) * center_freq / df)
-            ei = int((1 + margin) * center_freq / df)
-            si = max(0, min(si, len(P1)-1))
-            ei = max(0, min(ei, len(P1)-1))
-            return np.sqrt(np.sum(P1[si:ei]**2) / 2)
+            half_bw_hz   = max(margin * center_freq, 2 * df)  
+            si = max(0,          int((center_freq - half_bw_hz) / df))
+            ei = min(len(P1)-1,  int((center_freq + half_bw_hz) / df) + 1)
+            if si >= ei:
+                return 0.0
+            return float(np.sqrt(np.sum(P1[si:ei] ** 2)))    
 
         # BPFO harmonics
         features[0] = calculate_band_energy(BPFO)
         features[1] = calculate_band_energy(2 * BPFO)
         features[2] = calculate_band_energy(3 * BPFO)
         features[3] = np.sqrt(features[0]**2 + features[1]**2 + features[2]**2)
-        
+
         # BPFI harmonics
         features[4] = calculate_band_energy(BPFI)
         features[5] = calculate_band_energy(2 * BPFI)
         features[6] = calculate_band_energy(3 * BPFI)
         features[7] = np.sqrt(features[4]**2 + features[5]**2 + features[6]**2)
-        
+
         # BSF harmonics
-        features[8] = calculate_band_energy(BSF)
-        features[9] = calculate_band_energy(2 * BSF)
+        features[8]  = calculate_band_energy(BSF)
+        features[9]  = calculate_band_energy(2 * BSF)
         features[10] = calculate_band_energy(3 * BSF)
         features[11] = np.sqrt(features[8]**2 + features[9]**2 + features[10]**2)
-        
-        # Overall energies
+
+        # Overall energies — tidak berubah
         si_overall = int(shaft_freq * 0.8 / df)
-        features[12] = np.sqrt(np.sum(P1[si_overall:]**2) / 2)
-        
+        features[12] = np.sqrt(np.sum(P1[si_overall:] ** 2))
+
         si_bearing = int(shaft_freq * 2.1 / df)
-        features[13] = np.sqrt(np.sum(P1[si_bearing:]**2) / 2)
-        
-        si_low = int(shaft_freq * 0.5 / df)
+        features[13] = np.sqrt(np.sum(P1[si_bearing:] ** 2))
+
         ei_low = int(400 / df)
-        features[14] = np.sqrt(np.sum(P1[si_low:ei_low]**2) / 2)
-        
+        si_low = int(shaft_freq * 0.5 / df)
+        features[14] = np.sqrt(np.sum(P1[si_low:ei_low] ** 2))
+
         si_low_bearing = int(shaft_freq * 2.1 / df)
-        features[15] = np.sqrt(np.sum(P1[si_low_bearing:ei_low]**2) / 2)
-        
-        # 8 evenly divided portions of the one-sided FFT spectrum (not wavelets)
-        P1[0] = 0 # Remove DC
+        features[15] = np.sqrt(np.sum(P1[si_low_bearing:ei_low] ** 2))
+
+        # 8 spectral bands
+        P1[0] = 0
         band_size = (self.sampling_frequency_hz / 2) / 8
         for n_band in range(1, 9):
-            si_b = int((n_band - 1) * band_size / df)
-            if si_b == 0: si_b = 1  # Avoid DC again
-            ei_b = int(n_band * band_size / df)
-            si_b = max(0, min(si_b, len(P1)-1))
-            ei_b = max(0, min(ei_b, len(P1)-1))
-            features[16 + (n_band - 1)] = np.sqrt(np.sum(P1[si_b:ei_b]**2) / 2)
-            
+            si_b = max(1, int((n_band - 1) * band_size / df))
+            ei_b = min(len(P1) - 1, int(n_band * band_size / df))
+            features[16 + (n_band - 1)] = (
+                np.sqrt(np.sum(P1[si_b:ei_b] ** 2)) if si_b < ei_b else 0.0
+            )
+
         return features
 
     def process_csv_files(self) -> Dict[str, np.ndarray]:
@@ -277,7 +277,6 @@ class FeatureExtractionAndSelection:
 
     def extract_features_from_array(self, window_array: np.ndarray, shaft_freq: float) -> np.ndarray:
         """
-        Iterates over a numpy array of shape (n_samples, 2) and extracts features.
         
         Args:
             window_array (np.ndarray): 2D array representing (timesteps, channels). Channel 0 is horizontal, 1 is vertical.
@@ -288,6 +287,17 @@ class FeatureExtractionAndSelection:
         """
         import scipy.signal
         from scipy.integrate import cumulative_trapezoid
+
+        assert window_array.ndim == 3, f"Expected 3D array, got {window_array.ndim}D"
+        
+        # Auto detect format (channels-first vs channels-last)
+        if window_array.shape[1] == 2 and window_array.shape[2] > 2:
+            # PyTorch format: (T, 2, 2560) → transpose to (T, 2560, 2)
+            window_array = window_array.transpose(0, 2, 1)
+        elif window_array.shape[2] == 2:
+            pass  # It's in the correct format: (T, 2560, 2)
+        else:
+            raise ValueError(f"Cannot determine channel layout from shape {window_array.shape}")
         
         fs = self.sampling_frequency_hz
         n_samples = window_array.shape[0]
@@ -346,13 +356,18 @@ class FeatureExtractionAndSelection:
             for feats, target in zip(features_list, target_list):
                 feat_series = feats[:, i]
                 
-                # Pearson/Spearman 
+                # Spearman 
                 spearman_c, _ = scipy.stats.spearmanr(feat_series, target)
                 sp = abs(spearman_c) if not np.isnan(spearman_c) else 0.0
                 spearmans.append(sp)
                 
-                # Modified Monotonicity
-                mon = self.calculate_modified_monotonicity(feat_series, sigma=0.01)
+                # Modified Monotonicity: Dynamic sigma based on local feature variance
+                feat_diffs = np.diff(feat_series)
+                sigma = np.std(feat_diffs) * 0.1
+                if sigma < 1e-6:
+                    sigma = 1e-6
+                    
+                mon = self.calculate_modified_monotonicity(feat_series, sigma=sigma)
                 mon = abs(mon) if not np.isnan(mon) else 0.0
                 mons.append(mon)
                 
