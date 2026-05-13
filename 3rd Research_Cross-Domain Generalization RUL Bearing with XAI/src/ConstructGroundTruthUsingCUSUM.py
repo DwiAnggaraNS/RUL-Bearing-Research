@@ -216,6 +216,75 @@ class UnivariateCUSUMDetector:
         # Jika tidak terdeteksi sama sekali, kembalikan indeks terakhir
         return n - 1
 
+    def generate_pronostia_piecewise_rul(self, feature_series: np.ndarray, ema_span: int = 10) -> Tuple[np.ndarray, int]:
+        """
+        Generate Piecewise Linear RUL target specifically for PRONOSTIA dataset context.
+        Applies Exponential Moving Average (EMA) to smooth the signal, detects Change Point (TCP),
+        and creates an RUL array that is 1.0 (Healthy) until TCP, then linearly degrades to 0.0.
+
+        Args:
+            feature_series (np.ndarray): 1D array of extracted feature (e.g., RMS or Kurtosis).
+            ema_span (int): Span for the Pandas Exponential Moving Average.
+
+        Returns:
+            Tuple[np.ndarray, int]: 
+                - Piecewise RUL array (same length as input).
+                - TCP index (Time to Change Point).
+        """
+        feature_series = np.asarray(feature_series, dtype=np.float64)
+        n = len(feature_series)
+        
+        # 1. Data Smoothing (EMA)
+        smoothed_series = pd.Series(feature_series).ewm(span=ema_span).mean().values
+        
+        # 2. CUSUM Detection
+        tcp_index, _ = self.fit_predict(smoothed_series)
+        
+        # Fallback safety: If TCP is detected near the end or fails to detect effectively
+        if tcp_index >= n - 1 or tcp_index < max(20, int(n * 0.05)):
+            # Set to 10% of total length as a conservative fallback
+            tcp_index = max(1, int(n * 0.10))
+            
+        # 3. Construct Piecewise Linear RUL
+        # Flat 1.0 until TCP, then linear degradation to 0.0
+        rul_target = np.ones(n, dtype=np.float64)
+        if tcp_index < n - 1:
+            degradation_length = n - tcp_index
+            rul_target[tcp_index:] = np.linspace(1.0, 0.0, degradation_length)
+            
+        return rul_target, int(tcp_index), smoothed_series
+
+    def plot_cusum_validation(self, feature_series: np.ndarray, smoothed_series: np.ndarray, rul_target: np.ndarray, tcp_index: int):
+        """
+        Plots validation dual-axis visualization of original/smoothed feature against Constructed Piecewise RUL.
+        """
+        time_steps = np.arange(len(feature_series))
+
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+        
+        color1 = 'tab:gray'
+        color2 = 'tab:blue'
+        
+        ax1.set_xlabel('Time (Minutes or Windows)')
+        ax1.set_ylabel('Vibration Feature Level', color=color2)
+        ax1.plot(time_steps, feature_series, color=color1, alpha=0.4, label='Raw Feature')
+        ax1.plot(time_steps, smoothed_series, color=color2, linewidth=2, label=f'EMA Smoothed Feature')
+        
+        # Highlight TCP
+        ax1.axvline(x=tcp_index, color='red', linestyle='--', linewidth=2, label=f'TCP / FPT (Index {tcp_index})')
+        ax1.tick_params(axis='y', labelcolor=color2)
+        ax1.legend(loc='upper left')
+        
+        ax2 = ax1.twinx()
+        color3 = 'tab:green'
+        ax2.set_ylabel('RUL Target (Degradation State)', color=color3)
+        ax2.plot(time_steps, rul_target, color=color3, linestyle='-.', linewidth=3, label='Piecewise RUL Target')
+        ax2.tick_params(axis='y', labelcolor=color3)
+        ax2.legend(loc='upper right')
+
+        plt.title('Piecewise Linear RUL Construction via CUSUM Change Point Detection')
+        fig.tight_layout()
+        plt.show()
 
 # ==========================================
 # USAGE EXAMPLE FOR YOUR PIPELINE
